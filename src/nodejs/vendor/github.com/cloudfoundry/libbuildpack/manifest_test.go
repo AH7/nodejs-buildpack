@@ -10,14 +10,15 @@ import (
 
 	"github.com/cloudfoundry/libbuildpack"
 	"github.com/cloudfoundry/libbuildpack/ansicleaner"
+	httpmock "gopkg.in/jarcoal/httpmock.v1"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"gopkg.in/jarcoal/httpmock.v1"
 )
 
 var _ = Describe("Manifest", func() {
 	var (
+		oldCfStack  string
 		manifest    *libbuildpack.Manifest
 		manifestDir string
 		err         error
@@ -28,6 +29,9 @@ var _ = Describe("Manifest", func() {
 	)
 
 	BeforeEach(func() {
+		oldCfStack = os.Getenv("CF_STACK")
+		os.Setenv("CF_STACK", "cflinuxfs2")
+
 		manifestDir = "fixtures/manifest/standard"
 		currentTime = time.Now()
 		httpmock.Reset()
@@ -35,6 +39,7 @@ var _ = Describe("Manifest", func() {
 		buffer = new(bytes.Buffer)
 		logger = libbuildpack.NewLogger(ansicleaner.New(buffer))
 	})
+	AfterEach(func() { err = os.Setenv("CF_STACK", oldCfStack); Expect(err).To(BeNil()) })
 
 	JustBeforeEach(func() {
 		manifest, err = libbuildpack.NewManifest(manifestDir, logger, currentTime)
@@ -47,14 +52,69 @@ var _ = Describe("Manifest", func() {
 		})
 	})
 
+	Describe("ApplyOverride", func() {
+		var depsDir string
+		BeforeEach(func() {
+			depsDir, err = ioutil.TempDir("", "libbuildpack_override")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(os.Mkdir(filepath.Join(depsDir, "0"), 0755)).To(Succeed())
+			Expect(os.Mkdir(filepath.Join(depsDir, "1"), 0755)).To(Succeed())
+			Expect(os.Mkdir(filepath.Join(depsDir, "2"), 0755)).To(Succeed())
+
+			data := `---
+dotnet-core:
+  default_versions:
+  - name: node
+    version: 1.7.x
+  - name: thing
+    version: 9.3.x
+  dependencies:
+  - name: node
+    version: 1.7.6
+    cf_stacks: ['cflinuxfs2']
+  - name: thing
+    version: 9.3.6
+    cf_stacks: ['cflinuxfs2']
+ruby:
+  default_versions:
+  - name: node
+    version: 2.2.x
+  dependencies:
+  - name: node
+    version: 2.2.2
+    cf_stacks: ['cflinuxfs2']
+`
+			Expect(ioutil.WriteFile(filepath.Join(depsDir, "1", "override.yml"), []byte(data), 0644)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			Expect(os.RemoveAll(depsDir)).To(Succeed())
+		})
+
+		It("updates default version", func() {
+			Expect(manifest.DefaultVersion("node")).To(Equal(libbuildpack.Dependency{Name: "node", Version: "6.9.4"}))
+
+			Expect(manifest.ApplyOverride(depsDir)).To(Succeed())
+
+			Expect(manifest.DefaultVersion("node")).To(Equal(libbuildpack.Dependency{Name: "node", Version: "1.7.6"}))
+		})
+
+		It("doesn't remove data which is not overriden", func() {
+			Expect(manifest.DefaultVersion("ruby")).To(Equal(libbuildpack.Dependency{Name: "ruby", Version: "2.3.3"}))
+
+			Expect(manifest.ApplyOverride(depsDir)).To(Succeed())
+
+			Expect(manifest.DefaultVersion("ruby")).To(Equal(libbuildpack.Dependency{Name: "ruby", Version: "2.3.3"}))
+		})
+
+		It("adds new default versions", func() {
+			Expect(manifest.ApplyOverride(depsDir)).To(Succeed())
+
+			Expect(manifest.DefaultVersion("thing")).To(Equal(libbuildpack.Dependency{Name: "thing", Version: "9.3.6"}))
+		})
+	})
+
 	Describe("CheckStackSupport", func() {
-		var (
-			oldCfStack string
-		)
-
-		BeforeEach(func() { oldCfStack = os.Getenv("CF_STACK") })
-		AfterEach(func() { err = os.Setenv("CF_STACK", oldCfStack); Expect(err).To(BeNil()) })
-
 		Context("Stack is supported", func() {
 			BeforeEach(func() {
 				manifestDir = "fixtures/manifest/stacks"
@@ -127,9 +187,40 @@ var _ = Describe("Manifest", func() {
 	Describe("AllDependencyVersions", func() {
 		It("returns all the versions of the dependency", func() {
 			versions := manifest.AllDependencyVersions("dotnet-framework")
-			Expect(err).To(BeNil())
-
 			Expect(versions).To(Equal([]string{"1.0.0", "1.0.1", "1.0.3", "1.1.0"}))
+		})
+
+		Context("CF_STACK = xenial", func() {
+			BeforeEach(func() {
+				manifestDir = "fixtures/manifest/stacks"
+				os.Setenv("CF_STACK", "xenial")
+			})
+			It("limits to dependencies matching CF_STACK", func() {
+				versions := manifest.AllDependencyVersions("thing")
+				Expect(versions).To(Equal([]string{"1"}))
+			})
+		})
+
+		Context("CF_STACK = cflinuxfs2", func() {
+			BeforeEach(func() {
+				manifestDir = "fixtures/manifest/stacks"
+				os.Setenv("CF_STACK", "cflinuxfs2")
+			})
+			It("limits to dependencies matching CF_STACK", func() {
+				versions := manifest.AllDependencyVersions("thing")
+				Expect(versions).To(Equal([]string{"1", "2"}))
+			})
+		})
+
+		Context("CF_STACK = empty string", func() {
+			BeforeEach(func() {
+				manifestDir = "fixtures/manifest/stacks"
+				os.Setenv("CF_STACK", "cflinuxfs2")
+			})
+			It("lists all dependencies matching name", func() {
+				versions := manifest.AllDependencyVersions("thing")
+				Expect(versions).To(Equal([]string{"1", "2"}))
+			})
 		})
 	})
 

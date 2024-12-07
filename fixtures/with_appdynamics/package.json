@@ -9,7 +9,7 @@
   "author": "",
   "license": "BSD-2-Clause",
   "dependencies": {
-    "express": "~4.15.2",
+    "express": "~4.21.2",
     "logfmt": "~1.2.0",
     "appdynamics": "latest"
   },
